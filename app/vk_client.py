@@ -36,3 +36,13 @@ class VKClient:
 
     async def edit_message(self, peer_id: int, message_id: int, *, keyboard: str | None = None):
         return await self.call("messages.edit", peer_id=peer_id, message_id=message_id, keyboard=keyboard)
+
+    async def get_user_domain(self, user_id: int) -> str | None:
+        resp = await self.call("users.get", user_ids=str(user_id), fields="domain")
+        if not resp:
+            return None
+        user = resp[0]
+        domain = user.get("domain")
+        if isinstance(domain, str) and domain:
+            return domain.lower()
+        return None

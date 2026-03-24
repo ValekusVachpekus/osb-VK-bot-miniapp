@@ -38,6 +38,37 @@ def parse_payload(text: str | None) -> dict[str, Any]:
         return {}
 
 
+def normalize_identifier(text: str) -> str:
+    t = (text or "").strip().lower()
+    if t.startswith("https://vk.com/"):
+        t = t[len("https://vk.com/"):]
+    elif t.startswith("http://vk.com/"):
+        t = t[len("http://vk.com/"):]
+    if t.startswith("vk.com/"):
+        t = t[len("vk.com/"):]
+    t = t.lstrip("@").strip("/")
+    return t
+
+
+def parse_vk_user_id(identifier: str) -> int | None:
+    ident = normalize_identifier(identifier)
+    if ident.isdigit():
+        return int(ident)
+    if ident.startswith("id") and ident[2:].isdigit():
+        return int(ident[2:])
+    return None
+
+
+async def find_employee_for_user(db: AsyncSession, user_id: int, username_or_domain: str | None) -> Employee | None:
+    by_id = await db.scalar(select(Employee).where(Employee.user_id == user_id))
+    if by_id:
+        return by_id
+    uname = normalize_identifier(username_or_domain or "")
+    if uname:
+        return await db.scalar(select(Employee).where(Employee.username == uname))
+    return None
+
+
 async def get_user_role(db: AsyncSession, user_id: int) -> str:
     if user_id == settings.admin_id:
         return "admin"
@@ -103,7 +134,15 @@ async def send_complaint_to_all(db: AsyncSession, vk: VKClient, c: Complaint):
             mid = await vk.send_message(rid, base_text, keyboard=kb, attachment=(c.media_file_id if c.media_type in {"photo", "video", "doc"} else None))
             db.add(ComplaintMessage(complaint_id=c.id, peer_id=rid, message_id=int(mid)))
         except Exception as e:
-            logger.warning("Could not send complaint to %s: %s", rid, e)
+            logger.warning("Could not send complaint with attachment to %s: %s", rid, e)
+            try:
+                fallback_text = base_text
+                if c.media_file_id and c.media_type in {"photo", "video", "doc"}:
+                    fallback_text += f"\n📎 Вложение недоступно для пересылки: {c.media_file_id}"
+                mid = await vk.send_message(rid, fallback_text, keyboard=kb)
+                db.add(ComplaintMessage(complaint_id=c.id, peer_id=rid, message_id=int(mid)))
+            except Exception as e2:
+                logger.warning("Fallback complaint send failed to %s: %s", rid, e2)
     await db.commit()
 
 
@@ -112,8 +151,14 @@ async def invalidate_complaint_messages(db: AsyncSession, vk: VKClient, complain
     for row in rows:
         try:
             await vk.edit_message(row.peer_id, row.message_id, keyboard=json.dumps({"inline": True, "buttons": []}))
-        except Exception:
-            continue
+        except Exception as e:
+            logger.warning(
+                "Could not remove keyboard for complaint %s message %s/%s: %s",
+                complaint_id,
+                row.peer_id,
+                row.message_id,
+                e,
+            )
 
 
 async def log_to_vk_group(db: AsyncSession, vk: VKClient, complaint: Complaint, action: str, actor_id: int, reason: str | None = None):
@@ -339,13 +384,19 @@ def attachment_from_message(obj: dict[str, Any]) -> tuple[str | None, str | None
     t = a.get("type")
     if t == "photo":
         p = a.get("photo", {})
-        return f"photo{p.get('owner_id')}_{p.get('id')}", "photo"
+        acc = p.get("access_key")
+        suffix = f"_{acc}" if acc else ""
+        return f"photo{p.get('owner_id')}_{p.get('id')}{suffix}", "photo"
     if t == "video":
         v = a.get("video", {})
-        return f"video{v.get('owner_id')}_{v.get('id')}", "video"
+        acc = v.get("access_key")
+        suffix = f"_{acc}" if acc else ""
+        return f"video{v.get('owner_id')}_{v.get('id')}{suffix}", "video"
     if t == "doc":
         d = a.get("doc", {})
-        return f"doc{d.get('owner_id')}_{d.get('id')}", "doc"
+        acc = d.get("access_key")
+        suffix = f"_{acc}" if acc else ""
+        return f"doc{d.get('owner_id')}_{d.get('id')}{suffix}", "doc"
     return None, None
 
 
@@ -356,18 +407,16 @@ async def handle_start(db: AsyncSession, vk: VKClient, uid: int, username: str |
     if await is_blocked(db, uid):
         await vk.send_message(uid, "❌ Вы заблокированы и не можете использовать этого бота.")
         return
-    uname = (username or "").lower()
-    if uname:
-        emp = await db.scalar(select(Employee).where(Employee.username == uname))
-        if emp:
-            if not emp.user_id:
-                emp.user_id = uid
-                await db.commit()
-            if not emp.registered:
-                await vk.send_message(uid, "👋 Вы добавлены как сотрудник. Пройдите регистрацию командой /register")
-            else:
-                await vk.send_message(uid, "👮 Добро пожаловать, сотрудник!\n/complaints — активные жалобы\n/register — перерегистрация")
-            return
+    emp = await find_employee_for_user(db, uid, username)
+    if emp:
+        if not emp.user_id:
+            emp.user_id = uid
+            await db.commit()
+        if not emp.registered:
+            await vk.send_message(uid, "👋 Вы добавлены как сотрудник. Пройдите регистрацию командой /register")
+        else:
+            await vk.send_message(uid, "👮 Добро пожаловать, сотрудник!\n/complaints — активные жалобы\n/register — перерегистрация")
+        return
     await vk.send_message(uid, "👋 Добро пожаловать в веб-приёмную жалоб ОСБ ГАИ!\nИспользуйте /complaint для подачи жалобы.")
 
 
@@ -382,12 +431,12 @@ async def handle_text_message(db: AsyncSession, vk: VKClient, uid: int, username
     if text == "/register":
         if uid == settings.admin_id:
             return
-        exists = await db.scalar(select(Employee.id).where((Employee.username == (username or "").lower()) | (Employee.user_id == uid)))
-        if not exists:
+        emp = await find_employee_for_user(db, uid, username)
+        if not emp:
             await vk.send_message(uid, "❌ Вы не добавлены как сотрудник. Обратитесь к администратору.")
             return
-        if username:
-            await db.execute(update(Employee).where(Employee.username == username.lower(), Employee.user_id.is_(None)).values(user_id=uid))
+        if not emp.user_id:
+            emp.user_id = uid
             await db.commit()
         await set_state(db, uid, "register_fio", {})
         await vk.send_message(uid, "📝 Регистрация сотрудника\nШаг 1/4: Введите ваше ФИО")
@@ -396,8 +445,8 @@ async def handle_text_message(db: AsyncSession, vk: VKClient, uid: int, username
     if text == "/add_employee":
         if uid != settings.admin_id:
             return
-        await set_state(db, uid, "add_employee_username", {})
-        await vk.send_message(uid, "Введите VK username сотрудника (с @ или без):")
+        await set_state(db, uid, "add_employee_identifier", {})
+        await vk.send_message(uid, "Введите VK username/domain или VK ID сотрудника (пример: quuzer, @quuzer, id123, 123):")
         return
 
     if text == "/staff":
@@ -467,28 +516,53 @@ async def handle_text_message(db: AsyncSession, vk: VKClient, uid: int, username
         return
     if state == "register_nickname":
         await clear_state(db, uid)
-        uname = (username or "").lower()
-        q = update(Employee).where((Employee.username == uname) | (Employee.user_id == uid)).values(
-            fio=data.get("fio"), position=data.get("position"), rank=data.get("rank"), nickname=text, registered=1, user_id=uid
-        )
-        await db.execute(q)
+        emp = await find_employee_for_user(db, uid, username)
+        if not emp:
+            await vk.send_message(uid, "❌ Не удалось найти вашу запись сотрудника. Обратитесь к администратору.")
+            return
+        emp.fio = data.get("fio")
+        emp.position = data.get("position")
+        emp.rank = data.get("rank")
+        emp.nickname = text
+        emp.registered = 1
+        emp.user_id = uid
         await db.commit()
         await vk.send_message(uid, f"✅ Регистрация завершена!\n👤 ФИО: {data.get('fio')}\n🏷 Должность: {data.get('position')}\n⭐ Звание: {data.get('rank')}\n📛 Никнейм: {text}\n\n/complaints — активные жалобы")
         return
 
-    if state == "add_employee_username":
+    if state == "add_employee_identifier":
         await clear_state(db, uid)
-        uname = text.lstrip("@").lower().strip()
-        if not uname:
-            await vk.send_message(uid, "❌ Некорректный username.")
+        ident = normalize_identifier(text)
+        if not ident:
+            await vk.send_message(uid, "❌ Некорректный идентификатор.")
             return
-        exists = await db.scalar(select(Employee.id).where(Employee.username == uname))
-        if exists:
-            await vk.send_message(uid, f"⚠️ Сотрудник @{uname} уже добавлен.")
-            return
-        db.add(Employee(username=uname, registered=0))
+        parsed_user_id = parse_vk_user_id(ident)
+        target_user_id = parsed_user_id
+        target_username = None if parsed_user_id else ident
+
+        if parsed_user_id:
+            existing_by_id = await db.scalar(select(Employee).where(Employee.user_id == parsed_user_id))
+            if existing_by_id:
+                await vk.send_message(uid, f"⚠️ Сотрудник с VK ID {parsed_user_id} уже добавлен.")
+                return
+            try:
+                domain = await vk.get_user_domain(parsed_user_id)
+                if domain:
+                    target_username = domain
+            except Exception:
+                target_username = f"id{parsed_user_id}"
+        else:
+            existing_by_username = await db.scalar(select(Employee).where(Employee.username == target_username))
+            if existing_by_username:
+                await vk.send_message(uid, f"⚠️ Сотрудник @{target_username} уже добавлен.")
+                return
+
+        if not target_username:
+            target_username = f"id{target_user_id}"
+        db.add(Employee(username=target_username, user_id=target_user_id, registered=0))
         await db.commit()
-        await vk.send_message(uid, f"✅ Сотрудник @{uname} добавлен. Пусть выполнит /register")
+        suffix = f"VK ID {target_user_id}" if target_user_id else f"@{target_username}"
+        await vk.send_message(uid, f"✅ Сотрудник {suffix} добавлен. Пусть выполнит /register")
         return
 
     if state == "complaint_fio":
@@ -542,8 +616,11 @@ async def handle_text_message(db: AsyncSession, vk: VKClient, uid: int, username
     if state == "reject_reason":
         cid = int(data.get("complaint_id", 0))
         await clear_state(db, uid)
-        await process_decision(db, vk, complaint_id=cid, actor_id=uid, action="rejected", reason=text)
-        await vk.send_message(uid, f"❌ Жалоба #{cid} отклонена. Пользователь уведомлён.")
+        try:
+            await process_decision(db, vk, complaint_id=cid, actor_id=uid, action="rejected", reason=text)
+            await vk.send_message(uid, f"❌ Жалоба #{cid} отклонена. Пользователь уведомлён.")
+        except HTTPException as e:
+            await vk.send_message(uid, f"⚠️ {e.detail}")
         return
 
 
@@ -552,11 +629,17 @@ async def handle_payload_action(db: AsyncSession, vk: VKClient, uid: int, payloa
     if action in {"accept", "reject", "block"}:
         cid = int(payload.get("cid", 0))
         if action == "accept":
-            await process_decision(db, vk, complaint_id=cid, actor_id=uid, action="accepted")
-            await vk.send_message(uid, f"✅ Жалоба #{cid} принята. Пользователь уведомлён.")
+            try:
+                await process_decision(db, vk, complaint_id=cid, actor_id=uid, action="accepted")
+                await vk.send_message(uid, f"✅ Жалоба #{cid} принята. Пользователь уведомлён.")
+            except HTTPException as e:
+                await vk.send_message(uid, f"⚠️ {e.detail}")
         elif action == "block":
-            await process_decision(db, vk, complaint_id=cid, actor_id=uid, action="blocked")
-            await vk.send_message(uid, f"🚫 Пользователь по жалобе #{cid} заблокирован.")
+            try:
+                await process_decision(db, vk, complaint_id=cid, actor_id=uid, action="blocked")
+                await vk.send_message(uid, f"🚫 Пользователь по жалобе #{cid} заблокирован.")
+            except HTTPException as e:
+                await vk.send_message(uid, f"⚠️ {e.detail}")
         else:
             await set_state(db, uid, "reject_reason", {"complaint_id": cid})
             await vk.send_message(uid, f"✍️ Введите причину отклонения жалобы #{cid}:")
@@ -585,7 +668,11 @@ async def process_vk_message_event(obj: dict[str, Any], db: AsyncSession) -> Non
     uid = int(obj.get("from_id", 0))
     text = (obj.get("text") or "").strip()
     payload = parse_payload(obj.get("payload"))
-    username = (payload.get("username") or None)
+    username = None
+    try:
+        username = await vk.get_user_domain(uid)
+    except Exception:
+        username = (payload.get("username") or None)
     if payload.get("a"):
         await handle_payload_action(db, vk, uid, payload)
     else:
