@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OSB VK Mini App</title>
+  <style>
+    :root{
+      --bg:#0d1220;--panel:#151c30;--panel-2:#1a2340;--text:#eef2ff;--muted:#a8b1cc;
+      --accent:#4f7cff;--accent-2:#7d9cff;--ok:#2fbf71;--warn:#ff6b6b;--border:#263150;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;padding:16px;background:radial-gradient(circle at 10% 10%, #1a2340, var(--bg));
+      color:var(--text);font-family:Inter,Arial,sans-serif;
+    }
+    .container{max-width:1080px;margin:0 auto;padding-bottom:92px}
+    .hero{background:linear-gradient(135deg, #1e2a4d, #111933);border:1px solid var(--border);border-radius:16px;padding:18px}
+    h1,h2,h3{margin:0 0 10px}
+    .muted{color:var(--muted)}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .stack{display:flex;flex-direction:column;gap:10px}
+    .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+    .tabs button{border:1px solid var(--border);background:var(--panel);color:var(--text);padding:10px 14px;border-radius:10px;cursor:pointer}
+    .tabs button.active{background:var(--accent);border-color:var(--accent)}
+    .card{margin-top:14px;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px}
+    input,textarea,select{
+      width:100%;border:1px solid var(--border);background:var(--panel-2);color:var(--text);
+      border-radius:10px;padding:10px
+    }
+    textarea{min-height:90px;resize:vertical}
+    button{border:none;border-radius:10px;padding:10px 14px;background:var(--accent);color:#fff;cursor:pointer}
+    button.secondary{background:#2c3758}
+    button.ok{background:var(--ok)}
+    button.warn{background:var(--warn)}
+    .hidden{display:none}
+    .chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:#202a46;color:var(--muted);font-size:13px}
+    .list{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+    .item{background:#111933;border:1px solid var(--border);border-radius:12px;padding:12px}
+    .item-head{font-weight:700;margin-bottom:8px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .status{margin-top:10px;color:var(--muted)}
+    .bottom-nav{
+      position:fixed;left:0;right:0;bottom:0;display:none;gap:8px;
+      padding:10px 12px calc(10px + env(safe-area-inset-bottom));
+      background:rgba(12,17,31,.95);backdrop-filter:blur(8px);border-top:1px solid var(--border);z-index:20;
+    }
+    .bottom-nav button{
+      flex:1;min-height:44px;padding:10px 8px;font-size:13px;border-radius:12px;background:#243052;color:#dce6ff;
+    }
+    .bottom-nav button.active{background:var(--accent);color:#fff}
+
+    @media (max-width: 760px){
+      body{padding:10px}
+      .hero{padding:14px;border-radius:12px}
+      h1{font-size:22px}
+      h2{font-size:18px}
+      .row{flex-direction:column}
+      .row > *{width:100%;max-width:none !important}
+      button{min-height:44px;font-size:15px}
+      input,textarea,select{font-size:16px}
+      .tabs{display:none}
+      .bottom-nav{display:flex}
+      .card{padding:12px;border-radius:12px}
+      .actions button{flex:1}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>OSB VK Mini App</h1>
+      <p class="muted">Веб-приемная жалоб. Введите VK user_id для входа.</p>
+      <div class="row">
+        <input id="uid" placeholder="VK user_id" style="max-width:260px" />
+        <button onclick="init()">Войти</button>
+        <span id="role" class="chip hidden"></span>
+      </div>
+      <div id="tabs" class="tabs hidden"></div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <section id="tab-user" class="card hidden">
+      <h2>Подача жалобы</h2>
+      <div class="stack">
+        <input id="u-username" placeholder="username (опционально)" />
+        <input id="u-fio" placeholder="ФИО заявителя" />
+        <input id="u-officer" placeholder="Сотрудник/жетон" />
+        <textarea id="u-viol" placeholder="Описание нарушения"></textarea>
+        <div class="row">
+          <select id="u-media-type" style="max-width:260px">
+            <option value="">Без медиа</option>
+            <option value="link">Ссылка</option>
+            <option value="photo">photo attachment id</option>
+            <option value="video">video attachment id</option>
+            <option value="doc">doc attachment id</option>
+          </select>
+          <input id="u-media-id" placeholder="media id или ссылка" />
+        </div>
+        <div class="row">
+          <button class="ok" onclick="submitComplaint()">Отправить жалобу</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-operator" class="card hidden">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <h2>Интерфейс опера</h2>
+        <button class="secondary" onclick="loadComplaints()">Обновить</button>
+      </div>
+      <div id="complaints" class="list"></div>
+    </section>
+
+    <section id="tab-admin" class="card hidden">
+      <h2>Интерфейс админа</h2>
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:1;min-width:220px">
+          <label class="muted">Добавить опера</label>
+          <input id="emp-username" placeholder="username опера" />
+        </div>
+        <button onclick="addEmployee()">Добавить</button>
+        <button class="secondary" onclick="loadEmployees()">Обновить оперов</button>
+        <button class="secondary" onclick="loadBlocked()">Обновить блокировки</button>
+      </div>
+      <h3 style="margin-top:16px">Опера</h3>
+      <div id="employees" class="list"></div>
+      <h3 style="margin-top:16px">Заблокированные</h3>
+      <div id="blocked" class="list"></div>
+    </section>
+  </div>
+  <nav id="bottom-nav" class="bottom-nav hidden"></nav>
+
+<script>
+let userId = null;
+let role = "user";
+let allowedTabs = ["user"];
+const ROLE_TABS = {
+  user: ["user"],
+  operator: ["user", "operator"],
+  admin: ["user", "operator", "admin"],
+};
+
+function setStatus(msg){ document.getElementById("status").innerText = msg || ""; }
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const t = await r.text();
+  let d = {};
+  try { d = JSON.parse(t); } catch {}
+  if (!r.ok) throw new Error(d.detail || t || "Ошибка");
+  return d;
+}
+
+function renderTabs() {
+  const tabs = document.getElementById("tabs");
+  const bottomNav = document.getElementById("bottom-nav");
+  tabs.innerHTML = "";
+  bottomNav.innerHTML = "";
+  const labels = { user: "Подача жалобы", operator: "Интерфейс опера", admin: "Интерфейс админа" };
+  for (const tab of allowedTabs) {
+    const btn = document.createElement("button");
+    btn.id = "btn-" + tab;
+    btn.innerText = labels[tab];
+    btn.onclick = () => showTab(tab);
+    tabs.appendChild(btn);
+
+    const mbtn = document.createElement("button");
+    mbtn.id = "m-btn-" + tab;
+    mbtn.innerText = labels[tab];
+    mbtn.onclick = () => showTab(tab);
+    bottomNav.appendChild(mbtn);
+  }
+  tabs.classList.remove("hidden");
+  bottomNav.classList.remove("hidden");
+}
+
+function showTab(name) {
+  if (!allowedTabs.includes(name)) return;
+  ["user", "operator", "admin"].forEach((t) => {
+    document.getElementById("tab-" + t).classList.add("hidden");
+    const b = document.getElementById("btn-" + t);
+    if (b) b.classList.remove("active");
+    const mb = document.getElementById("m-btn-" + t);
+    if (mb) mb.classList.remove("active");
+  });
+  document.getElementById("tab-" + name).classList.remove("hidden");
+  const activeBtn = document.getElementById("btn-" + name);
+  if (activeBtn) activeBtn.classList.add("active");
+  const activeMobileBtn = document.getElementById("m-btn-" + name);
+  if (activeMobileBtn) activeMobileBtn.classList.add("active");
+}
+
+async function init() {
+  try {
+    userId = Number(document.getElementById("uid").value);
+    if (!userId) throw new Error("Введите корректный VK user_id");
+    const me = await api(`/api/me?user_id=${userId}`);
+    role = me.role;
+    allowedTabs = ROLE_TABS[role] || ["user"];
+
+    const roleChip = document.getElementById("role");
+    roleChip.innerText = `Роль: ${role}${me.blocked ? " (заблокирован)" : ""}`;
+    roleChip.classList.remove("hidden");
+
+    renderTabs();
+    showTab("user");
+    if (allowedTabs.includes("operator")) await loadComplaints();
+    if (allowedTabs.includes("admin")) {
+      await loadEmployees();
+      await loadBlocked();
+    }
+    setStatus("Готово");
+  } catch (e) {
+    setStatus(e.message || "Ошибка входа");
+  }
+}
+
+async function submitComplaint() {
+  try {
+    const mediaType = document.getElementById("u-media-type").value || null;
+    const mediaId = document.getElementById("u-media-id").value || null;
+    const body = {
+      user_id: userId,
+      username: document.getElementById("u-username").value || null,
+      fio: document.getElementById("u-fio").value,
+      officer_info: document.getElementById("u-officer").value,
+      violation: document.getElementById("u-viol").value,
+      media_type: mediaType,
+      media_file_id: mediaId,
+    };
+    const d = await api("/api/complaints", { method: "POST", body: JSON.stringify(body) });
+    setStatus(`Жалоба отправлена, №${d.id}`);
+  } catch (e) {
+    setStatus(e.message || "Ошибка отправки жалобы");
+  }
+}
+
+function complaintCard(c) {
+  const div = document.createElement("div");
+  div.className = "item";
+  div.innerHTML = `
+    <div class="item-head">Жалоба #${c.id}</div>
+    <div>От: ${c.username || "без username"} (ID ${c.user_id})</div>
+    <div>ФИО: ${c.fio}</div>
+    <div>Сотрудник/жетон: ${c.officer_info}</div>
+    <div>Нарушение: ${c.violation}</div>
+    ${c.media_file_id ? `<div>Медиа: ${c.media_type}: ${c.media_file_id}</div>` : ""}
+    <div class="actions">
+      <button class="ok" onclick="acceptComplaint(${c.id})">✅ Принять</button>
+      <button class="warn" onclick="rejectComplaint(${c.id})">❌ Отклонить</button>
+      <button class="secondary" onclick="blockComplaint(${c.id})">🚫 Заблокировать</button>
+    </div>
+  `;
+  return div;
+}
+
+async function loadComplaints() {
+  const list = await api(`/api/complaints/active?user_id=${userId}`);
+  const c = document.getElementById("complaints");
+  c.innerHTML = "";
+  if (!list.length) c.innerHTML = `<div class="muted">Активных жалоб нет</div>`;
+  list.forEach((x) => c.appendChild(complaintCard(x)));
+}
+
+async function acceptComplaint(id) { await api(`/api/complaints/${id}/accept`, { method: "POST", body: JSON.stringify({ actor_id: userId }) }); await loadComplaints(); }
+async function rejectComplaint(id) { const reason = prompt("Причина отклонения"); if (!reason) return; await api(`/api/complaints/${id}/reject`, { method: "POST", body: JSON.stringify({ actor_id: userId, reason }) }); await loadComplaints(); }
+async function blockComplaint(id) { await api(`/api/complaints/${id}/block`, { method: "POST", body: JSON.stringify({ actor_id: userId }) }); await loadComplaints(); }
+
+async function addEmployee() {
+  const username = document.getElementById("emp-username").value;
+  await api("/api/employees", { method: "POST", body: JSON.stringify({ actor_id: userId, username }) });
+  await loadEmployees();
+}
+
+async function loadEmployees() {
+  const list = await api(`/api/employees?user_id=${userId}`);
+  const c = document.getElementById("employees");
+  c.innerHTML = "";
+  if (!list.length) c.innerHTML = `<div class="muted">Сотрудников пока нет</div>`;
+  list.forEach((e) => {
+    const d = document.createElement("div");
+    d.className = "item";
+    d.innerHTML = `
+      <div class="item-head">@${e.username}</div>
+      <div>Статус: ${e.registered ? "зарегистрирован" : "ожидает регистрации"}</div>
+      <div class="actions"><button class="warn" onclick="delEmp('${e.username}')">Удалить</button></div>
+    `;
+    c.appendChild(d);
+  });
+}
+
+async function delEmp(username) {
+  await api(`/api/employees/${username}?actor_id=${userId}`, { method: "DELETE" });
+  await loadEmployees();
+}
+
+async function loadBlocked() {
+  const list = await api(`/api/blocked?user_id=${userId}`);
+  const c = document.getElementById("blocked");
+  c.innerHTML = "";
+  if (!list.length) c.innerHTML = `<div class="muted">Заблокированных нет</div>`;
+  list.forEach((b) => {
+    const d = document.createElement("div");
+    d.className = "item";
+    d.innerHTML = `
+      <div class="item-head">${b.user_id} ${b.username ? "(@" + b.username + ")" : ""}</div>
+      <div class="actions"><button class="ok" onclick="unblock(${b.user_id})">Разблокировать</button></div>
+    `;
+    c.appendChild(d);
+  });
+}
+
+async function unblock(uid) {
+  await api(`/api/blocked/${uid}/unblock`, { method: "POST", body: JSON.stringify({ actor_id: userId }) });
+  await loadBlocked();
+}
+</script>
+</body>
+</html>

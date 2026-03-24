@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+vk_osb.db
+.env
+.env.example
+*.md
+.qwen/
